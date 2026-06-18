@@ -4,6 +4,8 @@
 
 Passive domain reconnaissance: subdomains, WHOIS, DNS records, metadata, and clean investigative reports.
 
+![osint-demo](screenshots/osint-demo.png)
+
 ## Features
 - Domain/company passive search
 - WHOIS metadata lookup
