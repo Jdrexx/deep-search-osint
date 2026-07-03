@@ -16,9 +16,7 @@ def db() -> sqlite3.Connection:
     conn=sqlite3.connect(DB_FILE); conn.row_factory=sqlite3.Row; conn.execute('pragma journal_mode=wal'); return conn
 def init_db() -> None:
     with db() as conn: conn.execute('create table if not exists records (id integer primary key autoincrement, kind text not null, title text not null, payload text not null, created_at text not null)')
-@app.on_event("startup")
-def on_startup() -> None:
-    init_db()
+init_db()
 def save_record(kind: str, title: str, payload: str) -> int:
     with db() as conn:
         cur=conn.execute('insert into records(kind,title,payload,created_at) values (?,?,?,?)',(kind,title,payload,datetime.now(timezone.utc).isoformat())); return int(cur.lastrowid)
@@ -38,14 +36,20 @@ def rdap_lookup(domain: str) -> dict:
         import urllib.request
         resp = urllib.request.urlopen(urllib.request.Request(f"https://rdap.verisign.com/com/v1/domain/{domain}", headers={"Accept":"application/rdap+json","User-Agent":"osint-dash/0.1"}), timeout=10)
         data = json.loads(resp.read().decode())
-        return {"registrar": data.get('events',[{}])[0].get('eventAction','N/A'), "creation_date": next((e['eventDate'][:10] for e in data.get('events',[]) if e.get('eventAction')=='registration'),'N/A'), "expiry_date": next((e['eventDate'][:10] for e in data.get('events',[]) if e.get('eventAction')=='expiration'),'N/A'), "nameservers": [ns.get('ldhName','') for ns in data.get('nameservers',[])]}
+        registrar = next((v[3] for ent in data.get('entities',[]) if 'registrar' in ent.get('roles',[]) for v in ent.get('vcardArray',['',[]])[1] if v[0]=='fn'), 'N/A')
+        return {"registrar": registrar, "creation_date": next((e['eventDate'][:10] for e in data.get('events',[]) if e.get('eventAction')=='registration'),'N/A'), "expiry_date": next((e['eventDate'][:10] for e in data.get('events',[]) if e.get('eventAction')=='expiration'),'N/A'), "nameservers": [ns.get('ldhName','') for ns in data.get('nameservers',[])]}
     except Exception as e:
         return {"error": str(e)[:120]}
 def dns_records(domain: str) -> dict:
     records = {"a":[], "mx":[], "ns":[], "txt":[]}
     try:
+        import socket
+        records["a"] = sorted({info[4][0] for info in socket.getaddrinfo(domain, None, family=socket.AF_INET)})
+    except Exception:
+        pass
+    try:
         import subprocess
-        for rtype in ['A','MX','NS','TXT']:
+        for rtype in ['MX','NS','TXT']:
             r = subprocess.run(['nslookup','-type='+rtype,domain], capture_output=True, text=True, timeout=10)
             for line in r.stdout.splitlines():
                 s=line.strip()
@@ -53,7 +57,7 @@ def dns_records(domain: str) -> dict:
                     val=s.split('=',1)[-1].strip()
                     if val: records[rtype.lower()].append(val)
     except Exception:
-        records["note"] = "DNS lookup unavailable"
+        records["note"] = "MX/NS/TXT lookup unavailable (nslookup missing)"
     return records
 @app.post('/api/lookup')
 def lookup(req: DomainRequest):
