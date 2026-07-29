@@ -2,11 +2,13 @@ from __future__ import annotations
 import json, sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
+import re
 from typing import Any
+from urllib.parse import quote
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 APP_NAME='Deep Search OSINT Dashboard'
 DB_FILE=Path(__file__).resolve().parent.parent/'data'/'app.sqlite'
 DB_FILE.parent.mkdir(exist_ok=True)
@@ -32,12 +34,34 @@ def health(): return {'ok': True, 'app': APP_NAME, 'records': len(rows())}
 def home(): return INDEX_HTML
 
 class DomainRequest(BaseModel):
-    domain: str = Field(..., min_length=3)
+    domain: str = Field(..., min_length=3, max_length=253)
+
+    @field_validator("domain")
+    @classmethod
+    def validate_domain(cls, value: str) -> str:
+        domain = value.strip().lower().rstrip(".")
+        try:
+            ascii_domain = domain.encode("idna").decode("ascii")
+        except UnicodeError as exc:
+            raise ValueError("domain is not valid IDNA") from exc
+        if not re.fullmatch(
+            r"(?=.{3,253}\Z)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}",
+            ascii_domain,
+        ):
+            raise ValueError("domain must be a valid DNS hostname")
+        return ascii_domain
+
 def rdap_lookup(domain: str) -> dict:
     try:
         import urllib.request
-        resp = urllib.request.urlopen(urllib.request.Request(f"https://rdap.verisign.com/com/v1/domain/{domain}", headers={"Accept":"application/rdap+json","User-Agent":"osint-dash/0.1"}), timeout=10)
-        data = json.loads(resp.read().decode())
+        url = f"https://rdap.verisign.com/com/v1/domain/{quote(domain, safe='')}"
+        request = urllib.request.Request(
+            url,
+            headers={"Accept":"application/rdap+json","User-Agent":"osint-dash/0.1"},
+        )
+        # The request target is assembled from a fixed HTTPS origin.
+        with urllib.request.urlopen(request, timeout=10) as response:  # nosec B310
+            data = json.loads(response.read().decode())
         return {"registrar": data.get('events',[{}])[0].get('eventAction','N/A'), "creation_date": next((e['eventDate'][:10] for e in data.get('events',[]) if e.get('eventAction')=='registration'),'N/A'), "expiry_date": next((e['eventDate'][:10] for e in data.get('events',[]) if e.get('eventAction')=='expiration'),'N/A'), "nameservers": [ns.get('ldhName','') for ns in data.get('nameservers',[])]}
     except Exception as e:
         return {"error": str(e)[:120]}
@@ -57,7 +81,7 @@ def dns_records(domain: str) -> dict:
     return records
 @app.post('/api/lookup')
 def lookup(req: DomainRequest):
-    domain = req.domain.lower().strip()
+    domain = req.domain
     rdap = rdap_lookup(domain)
     dns = dns_records(domain)
     result = {"domain": domain, "whois": rdap, "dns": dns}
